@@ -127,48 +127,26 @@ class IDAArm64Emulator(Arm64Emulator):
     """IDA集成的ARM64模拟器，继承自Arm64Emulator基类"""
     def remove_last_line_efficient(self, filename):
         try:
-            with open(filename, 'r+', encoding='utf-8') as file:
-                # 移动到文件末尾
-                file.seek(0, 2)
-                file_size = file.tell()
-                
-                # 如果文件为空，直接返回
-                if file_size == 0:
-                    return
-                
-                # 从后向前查找最后一个换行符
-                pos = file_size - 1
-                found_newline = False
-                
-                while pos >= 0:
-                    file.seek(pos)
-                    char = file.read(1)
-                    if char == '\n':
-                        found_newline = True
-                        break
-                    pos -= 1
-                
-                # 根据是否找到换行符进行截断
-                if found_newline:
-                    file.truncate(pos)
-                else:
-                    # 如果没有找到换行符，说明整个文件只有一行
-                    file.truncate(0)
-                    
+            with open(filename, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            if lines:
+                lines.pop()  # 删除最后一行
+                with open(filename, 'w', encoding='utf-8') as f:
+                    f.writelines(lines)
         except Exception as e:
             return
     
     def init_log_files(self, tenet_log_path, user_log_path):
         """初始化日志文件"""
         if tenet_log_path:
-            self.remove_last_line_efficient(tenet_log_path)
+            # self.remove_last_line_efficient(tenet_log_path)
             self.trace_log = open(tenet_log_path, "a")
-            self.trace_log.write("\n")
+            # self.trace_log.write("\n")
         
         if user_log_path:
-            self.remove_last_line_efficient(user_log_path)
+            # self.remove_last_line_efficient(user_log_path)
             self.log_file = open(user_log_path, "a")
-            self.log_file.write("\n")
+            # self.log_file.write("\n")
 
     def __init__(self, heap_base=0x1000000, heap_size=0x90000):
         """初始化IDA集成模拟器"""
@@ -183,76 +161,6 @@ class IDAArm64Emulator(Arm64Emulator):
         self.last_regs = None
         self.BASE = 0
         self.run_range = (0, 0)
-        self.map_range = []
-
-    # ==============================
-    # 重写父类方法 - 内存管理
-    # ==============================
-
-    def load_memory_mappings(self, load_dumps_path):
-        """重写：加载内存映射，集成IDA段信息"""
-        mem_list = os.listdir(load_dumps_path)
-        map_list = []
-        
-        # 解析内存映射文件
-        for filename in mem_list:
-            pattern = r'0x([0-9a-fA-F]+)_0x([0-9a-fA-F]+)_0x([0-9a-fA-F]+)\.bin$'
-            match = re.search(pattern, filename)
-            if match:
-                mem_base = int(match.group(1), 16)
-                mem_end = int(match.group(2), 16)
-                mem_size = int(match.group(3), 16)
-                map_list.append((mem_base, mem_end, mem_size, filename))
-
-        # 按照内存基址排序后加载
-        map_list.sort(key=lambda x: x[0])
-        
-        for mem_base, mem_end, mem_size, filename in map_list:
-            if filename in self.loaded_files:
-                continue
-
-            upper_bound = 0
-            lower_bound = 0xfffffffffffffffff
-
-            for mem_range in self.map_range:
-                if mem_base <= mem_range[1] and mem_base >= mem_range[0]:
-                    upper_bound = mem_range[1]
-                if mem_end <= mem_range[1] and mem_end >= mem_range[0]:
-                    lower_bound = mem_range[0]
-                if upper_bound != 0 and lower_bound != 0xfffffffffffffffff:
-                    break
-
-            if mem_base < upper_bound:
-                mem_base = upper_bound
-            if mem_base & 0xfff != 0:
-                mem_base = mem_base & 0xfffffffffffff000
-
-            if mem_end > lower_bound:
-                mem_end = lower_bound
-            
-            mem_size = mem_end - mem_base
-
-            # if mem_size <= 0:
-            #     mem_size = 0x1000            
-            if mem_size <= 0:
-                print(f"continue: map file {filename} {hex(mem_base)} {hex(mem_end)} {hex(mem_size)}, bound ({hex(upper_bound)} - {hex(lower_bound)})")
-                continue
-
-            elif mem_size & 0xfff != 0:
-                mem_size = (mem_size & 0xfffffffffffff000) + 0x1000
-
-            mem_end = mem_base + mem_size
-
-            print(f"map file {filename} {hex(mem_base)} {hex(mem_end)} {hex(mem_size)}, bound ({hex(upper_bound)} - {hex(lower_bound)})")
-            self.mu.mem_map(mem_base, mem_size)
-            self.map_range.append((mem_base, mem_end))
-
-        # 加载内存数据
-        for mem_base, mem_end, mem_size, filename in map_list:
-            if filename not in self.loaded_files:
-                print(f"write file {filename} {hex(mem_base)} {hex(mem_end)} {hex(mem_size)}")
-                self.load_file(os.path.join(load_dumps_path, filename), mem_base, mem_size)
-                self.loaded_files.append(filename)
 
     # ==============================
     # 重写父类方法 - 主要模拟
@@ -281,10 +189,6 @@ class IDAArm64Emulator(Arm64Emulator):
 
             # 加载内存映射
             self.load_memory_mappings(load_dumps_path)
-            
-            # 设置线程指针
-            if self.tpidr_value is not None:
-                self.mu.reg_write(UC_ARM64_REG_TPIDR_EL0, self.tpidr_value)
 
             # 设置调试钩子
             start_addr = self.mu.reg_read(self.REG_MAP["pc"])
@@ -502,7 +406,7 @@ class IDAArm64Emulator(Arm64Emulator):
         ida_dbg.wait_for_next_event(ida_dbg.WFNE_SUSP, -1)
 
         for reg_name in self.REG_MAP.keys():
-            if "w" in reg_name:
+            if "w" in reg_name or "tpidr" in reg_name:
                 continue
             uc_value = self.mu.reg_read(self.REG_MAP[reg_name])
             ida_value = idc.get_reg_value(reg_name)
@@ -567,6 +471,9 @@ def uni_trace_main(endaddr_relative:int, so_name: str = "", tpidr_value_input: i
             emulator.dump_single_segment_address(reg_value, DUMP_SINGLE_SEG_SIZE, emulator.dump_path, True)
         
         # 保存寄存器状态
+        if tpidr_value_input != None:
+            registers["tpidr"] = tpidr_value_input
+
         print("[+] DUMPING registers")
         with open(f"{emulator.dump_path}/regs.json", "w+") as f:
             json.dump(registers, f)

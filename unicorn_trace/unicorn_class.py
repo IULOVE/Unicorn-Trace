@@ -31,7 +31,9 @@ class Arm64Emulator:
         "w28": UC_ARM64_REG_W28, "w29": UC_ARM64_REG_W29, "w30": UC_ARM64_REG_W30,
         
         # Special registers
-        "pc": UC_ARM64_REG_PC, "sp": UC_ARM64_REG_SP, "fp": UC_ARM64_REG_X29, "lr": UC_ARM64_REG_X30
+        "pc": UC_ARM64_REG_PC, "sp": UC_ARM64_REG_SP, "fp": UC_ARM64_REG_X29, "lr": UC_ARM64_REG_X30,
+
+        "tpidr": UC_ARM64_REG_TPIDR_EL0
     }
     
     # 内存访问指令常量
@@ -70,6 +72,7 @@ class Arm64Emulator:
         self.now_contain = ""
         
         self.loaded_files = []
+        self.map_range = []
     # ==============================
     # 内存管理方法
     # ==============================
@@ -387,6 +390,10 @@ class Arm64Emulator:
         if code == b"\xBF\x23\x03\xD5":  # handle autiasp
             raise UcError(0, "Except AUTIASP")
 
+        code = self.mu.mem_read(address, 4)
+        if code == b"\x01\x00\x00\xD4":  # handle autiasp
+            raise UcError(0, "Except AUTIASP")
+        
         # 处理寄存器值修正
         self._fix_register_values()
         
@@ -453,8 +460,9 @@ class Arm64Emulator:
         if user_log_path:
             self.log_file = open(user_log_path, "w")
 
+
     def load_memory_mappings(self, load_dumps_path):
-        """加载内存映射"""
+        """重写：加载内存映射，集成IDA段信息"""
         mem_list = os.listdir(load_dumps_path)
         map_list = []
         
@@ -462,40 +470,61 @@ class Arm64Emulator:
         for filename in mem_list:
             pattern = r'0x([0-9a-fA-F]+)_0x([0-9a-fA-F]+)_0x([0-9a-fA-F]+)\.bin$'
             match = re.search(pattern, filename)
-            if match and filename not in self.loaded_files:
+            if match:
                 mem_base = int(match.group(1), 16)
                 mem_end = int(match.group(2), 16)
                 mem_size = int(match.group(3), 16)
                 map_list.append((mem_base, mem_end, mem_size, filename))
-                self.loaded_files.append(filename)
 
         # 按照内存基址排序后加载
         map_list.sort(key=lambda x: x[0])
-        tmp = (0, 0, 0, "")
         
         for mem_base, mem_end, mem_size, filename in map_list:
-            # 内存对齐处理
-            if mem_base < tmp[1]:
-                mem_base = tmp[1]
-            elif mem_base & 0xfff != 0:
+            if filename in self.loaded_files:
+                continue
+
+            upper_bound = 0
+            lower_bound = 0xfffffffffffffffff
+
+            for mem_range in self.map_range:
+                if mem_base <= mem_range[1] and mem_base >= mem_range[0]:
+                    upper_bound = mem_range[1]
+                if mem_end <= mem_range[1] and mem_end >= mem_range[0]:
+                    lower_bound = mem_range[0]
+                if upper_bound != 0 and lower_bound != 0xfffffffffffffffff:
+                    break
+
+            if mem_base < upper_bound:
+                mem_base = upper_bound
+            if mem_base & 0xfff != 0:
                 mem_base = mem_base & 0xfffffffffffff000
 
+            if mem_end > lower_bound:
+                mem_end = lower_bound
+            
             mem_size = mem_end - mem_base
+
+            # if mem_size <= 0:
+            #     mem_size = 0x1000            
             if mem_size <= 0:
-                mem_size = 0x1000
+                print(f"continue: map file {filename} {hex(mem_base)} {hex(mem_end)} {hex(mem_size)}, bound ({hex(upper_bound)} - {hex(lower_bound)})")
+                continue
+
             elif mem_size & 0xfff != 0:
                 mem_size = (mem_size & 0xfffffffffffff000) + 0x1000
 
             mem_end = mem_base + mem_size
-            tmp = (mem_base, mem_end, mem_size, filename)
-            
-            print(f"map file {filename} {hex(mem_base)} {hex(mem_end)} {hex(mem_size)}")
+
+            print(f"map file {filename} {hex(mem_base)} {hex(mem_end)} {hex(mem_size)}, bound ({hex(upper_bound)} - {hex(lower_bound)})")
             self.mu.mem_map(mem_base, mem_size)
+            self.map_range.append((mem_base, mem_end))
 
         # 加载内存数据
         for mem_base, mem_end, mem_size, filename in map_list:
-            print(f"write file {filename} {hex(mem_base)} {hex(mem_end)} {hex(mem_size)}")
-            self.load_file(os.path.join(load_dumps_path, filename), mem_base, mem_size)
+            if filename not in self.loaded_files:
+                print(f"write file {filename} {hex(mem_base)} {hex(mem_end)} {hex(mem_size)}")
+                self.load_file(os.path.join(load_dumps_path, filename), mem_base, mem_size)
+                self.loaded_files.append(filename)
 
     def init_trace_log(self, so_name):
         """初始化trace日志"""
@@ -588,10 +617,19 @@ class Arm64Emulator:
         """清理资源"""
         if self.log_file:
             self.log_file.close()
+            self.log_file = None
         if self.trace_log:
             self.trace_log.close()
+            self.trace_log = None
         
         # 移除所有钩子
         for hook in self.hooks:
-            self.mu.hook_del(hook)
+            try:
+                self.mu.hook_del(hook)
+            except Exception as e:
+                # 忽略钩子删除错误
+                pass
+        
+        # 清空钩子列表
+        self.hooks.clear()
 

@@ -1,4 +1,4 @@
-# Unicorn ARM64 ida Trace
+# Unicorn ARM64 IDA Trace
 
 [简体中文](./README_zh.md)
 
@@ -20,6 +20,13 @@ The tool doesn't require full memory dumps, instead dynamically dumping memory o
   - Load memory maps and register states from files
   - Custom simulation ranges
   - Generate detailed execution logs (`uc.log` and `tenet.log`)
+  - Skip external function calls automatically
+  - Merge trace logs from multiple execution segments
+  - Support for continuous execution across memory dumps
+
+- **Single Script Mode** (`single_script/dynamic_dump.py`)
+  - Direct execution in IDA without library dependencies
+  - Lightweight alternative to the full plugin
 
 ## File Structure
 
@@ -32,7 +39,12 @@ The tool doesn't require full memory dumps, instead dynamically dumping memory o
 ├── single_script/                # Utility scripts
 │   ├── dynamic_dump.py           # IDA single-script version
 │   └── dump_single.py            # Single dump script (not provided)
-└── README.md                     # Project documentation
+├── imgs/                         # Screenshots and GIFs
+│   ├── 1.gif
+│   ├── 2.gif
+│   └── 3.gif
+├── README.md                     # English documentation
+└── README_zh.md                  # Chinese documentation
 ```
 
 ## Installation & Usage
@@ -68,7 +80,23 @@ Fill required parameters in main function (same as above)
 
 ### Feature 2: Standalone Emulator Usage
 
+Run a single dump section.
+
 ![alt text](imgs/2.gif)
+
+#### Using `run_once` function (recommended):
+```python
+from unicorn_trace import run_once
+
+if __name__ == "__main__":
+    result = run_once(
+        dump_path="./dumps",
+        so_path="/path/to/your.so",
+        end_addr_relative=0x000000
+    )
+```
+
+#### Using the emulator class directly:
 ```python
 from unicorn_trace import SelfRunArm64Emulator
 
@@ -77,7 +105,7 @@ emulator = SelfRunArm64Emulator()
 emulator.setup_from_files("libtarget.so", "./dumps")
 
 # Run simulation
-emulator.custom_main_trace(
+result = emulator.custom_main_trace(
     so_name="libtarget.so",
     end_addr=0x123456,
     tenet_log_path="./trace.log",
@@ -85,6 +113,41 @@ emulator.custom_main_trace(
     load_dumps_path="./dumps"
 )
 ```
+
+### Feature 3: Simulate The Whole Process
+When dealing with code that contains multiple external function calls, the plugin creates separate dump folders for each execution segment. The `run_all_continuous` function in `unicorn_trace.py` allows you to execute all these segments in order, skipping external calls and merging the trace logs.
+
+#### Usage Example:
+
+```python
+# In unicorn_trace.py or your own script
+from unicorn_trace import run_all_continuous
+
+# Execute all dump folders in chronological order
+success = run_all_continuous(
+    dump_path="./tmp",
+    so_path="/path/to/your.so",
+    end_addr_relative=end_addr
+)
+
+if success:
+    print("Continuous execution completed successfully!")
+else:
+    print("Continuous execution failed or incomplete.")
+```
+
+#### How it works:
+1. **Sort dump folders**: Automatically sorts `dump_<timestamp>` folders by timestamp (oldest first)
+2. **Continuous execution**: Executes each dump folder in order, starting from the first
+3. **External call skipping**: When encountering external function calls (result_code == 1), automatically continues with the next dump folder
+4. **Trace merging**: Combines all execution logs into continuous `continuous_sim.log` and `continuous_tenet.log` files
+5. **State preservation**: Maintains register state across execution segments (when supported by the emulator)
+
+#### Benefits:
+- **Seamless analysis**: Get a continuous trace even when code calls external libraries
+- **Time-ordered execution**: Ensures execution follows the actual temporal sequence
+- **Automated workflow**: No need to manually run each dump folder separately
+- **Consolidated logs**: All trace data in one place for easier analysis
 
 ## Example Workflow
 Also see [Kanxue Article](https://bbs.kanxue.com/thread-289135.htm)
@@ -101,16 +164,15 @@ Use `unicorn_trace.py` to generate tenet.log and combine all logs
 
 ## Notes
 
-1. Special register values (like TPIDR) require manual configuration
-2. Memory region dumping affects efficiency - larger `DUMP_SINGLE_SEG_SIZE` is slower, smaller may cause errors
-3. Exception handling support:
+1. Memory region dumping affects efficiency - larger `DUMP_SINGLE_SEG_SIZE` is slower, smaller may cause errors
+2. Exception handling support:
    - Memory access errors (UC_ERR_READ_UNMAPPED)
    - Range violations (Code Run out of range)
    - AUTIASP instruction exceptions
    - B4 register handling
    - UNICORN runtime comparison with IDA
-4. Each run is independent - if an error occurs mid-run, existing dump folders are unaffected. Just delete the latest error dump file and rerun after fixing the issue
-5. Single round external call limit is 50 (shows `restart` when exceeded). Modify `ROUND_MAX` in code to change
+3. Each run is independent - if an error occurs mid-run, existing dump folders are unaffected. Just delete the latest error dump file and rerun after fixing the issue
+4. Single round external call limit is 50 (shows `restart` when exceeded). Modify `ROUND_MAX` in code to change
 
 ## Error Handling
 
@@ -118,6 +180,49 @@ Common error codes:
 - Missing `TPIDR`: Need PC value near error (or check log assembly), manually debug to `mrs xxx` location to get `TPIDR` register value. This occurs because IDA can't retrieve it, though it remains constant throughout execution
 - IDA breakpoints causing errors: Disable all IDA breakpoints before running to avoid errors during comparison and call skipping
 - IDA errors: IDA errors pause execution - just restart
+
+## API Reference
+
+### Main Functions
+
+#### `run_once(dump_path, so_path, end_addr_relative, tdpr=None)`
+Execute a single dump folder.
+
+**Parameters:**
+- `dump_path`: Path to the dump folder
+- `so_path`: Path to the shared object file
+- `end_addr_relative`: Target address relative to base
+- `tdpr`: Optional TPIDR register value
+
+**Returns:**
+- Result code (114514 for success, other codes for errors)
+
+#### `run_all_continuous(dump_path, so_path, end_addr_relative, tdpr=None)`
+Execute multiple dump folders continuously.
+
+**Parameters:**
+- `dump_path`: Path containing dump folders
+- `so_path`: Path to the shared object file
+- `end_addr_relative`: Target address relative to base
+- `tdpr`: Optional TPIDR register value
+
+**Returns:**
+- `True` if execution reached target address, `False` otherwise
+
+#### `main(endaddr_relative, so_path, tpidr_value_input=None, load_path=".", save_path=".")`
+Legacy main function for single execution.
+
+### Classes
+
+#### `SelfRunArm64Emulator`
+Main emulator class for standalone execution.
+
+**Key methods:**
+- `setup_from_files(so_path, load_path)`: Initialize from dump files
+- `custom_main_trace(so_name, end_addr, tenet_log_path=None, user_log_path="./uc.log", load_dumps_path="./dumps")`: Execute simulation
+
+#### `IDAArm64Emulator`
+IDA-integrated emulator class (used by plugin).
 
 ## Contribution
 
@@ -128,11 +233,23 @@ Welcome to submit Issues or Pull Requests. Please ensure:
 
 ## TODO
 
-- Improve efficiency: Continue execution after mid-process memory dumps instead of restarting
+### Completed
+- ✓ **Continuous execution**: Added `run_all_continuous` function in `unicorn_trace.py` to execute multiple dump folders in order, skip external calls, and merge trace logs
+- ✓ **Improve efficiency**: Continue execution after mid-process memory dumps instead of restarting
+
+### In Progress / Future Improvements
 - Multi-architecture support
+- Better state preservation across execution segments
+- Enhanced external call detection and handling
+- Performance optimization for large memory dumps
+- GUI interface for continuous execution configuration
 
 ## Reference
 
 Tenet IDA 9.0: https://github.com/jiqiu2022/Tenet-IDA9.0
 
 Tenet: https://github.com/gaasedelen/tenet
+
+Unicorn Engine: https://github.com/unicorn-engine/unicorn
+
+Capstone Engine: https://github.com/capstone-engine/capstone

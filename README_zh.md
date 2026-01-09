@@ -1,12 +1,12 @@
-# Unicorn ARM64 ida trace 工具
+# Unicorn ARM64 IDA 追踪工具
 
-[简体中文](./README_zh.md)
+[English](./README.md)
 
 ![alt text](imgs/1.gif)
 
 本项目提供了一套轻量级的基于 Unicorn 引擎的 ARM64 动态追踪模拟工具，支持在 IDA Pro 中作为插件运行或独立执行。本工具与 IDA 紧密集成，确保执行过程与 IDA 一致，避免出错；提供可靠的模拟执行再现能力，并生成美观的 Tenet 日志用于调试分析。主要功能包括动态代码模拟、内存转储、寄存器状态追踪和指令级日志记录。
 
-本工具无需全量 dump 内存，只在运行过程中按需动态 dump 内存因此效率和速度都很高，再加上过程检查能确保整个获取过程都是完善无误的。作为 trace 工具，该工具在 vm 分析中相当有用，适用性和速率都很好。但在外部调用非常多且密集的用户函数，效率会受到很大影响，后续可能会针对此进行优化
+本工具无需全量 dump 内存，只在运行过程中按需动态 dump 内存因此效率和速度都很高，再加上过程检查能确保整个获取过程都是完善无误的。作为 trace 工具，该工具在 vm 分析中相当有用，适用性和速率都很好。但在外部调用非常多且密集的用户函数，效率会受到很大影响，后续可能会针对此进行优化。
 
 ## 主要功能
 
@@ -20,6 +20,13 @@
   - 从文件加载内存映射和寄存器状态
   - 自定义模拟范围
   - 生成详细执行日志（`uc.log` 和 `tenet.log`）
+  - 自动跳过外部函数调用
+  - 合并多个执行片段的追踪日志
+  - 支持跨内存转储的连续执行
+
+- **单脚本模式** (`single_script/dynamic_dump.py`)
+  - 直接在 IDA 中执行，无需库文件依赖
+  - 完整插件的轻量级替代方案
 
 ## 文件结构
 
@@ -32,7 +39,12 @@
 ├── single_script/                # 实用脚本
 │   ├── dynamic_dump.py           # IDA 单脚本版本
 │   └── dump_single.py            # 单次转储脚本（未提供）
-└── README.md                     # 项目文档
+├── imgs/                         # 截图和 GIF
+│   ├── 1.gif
+│   ├── 2.gif
+│   └── 3.gif
+├── README.md                     # 英文文档
+└── README_zh.md                  # 中文文档
 ```
 
 ## 安装与使用
@@ -41,6 +53,7 @@
 ```bash
 pip install unicorn capstone
 ```
+
 ### IDA 安装
 
 将 `dyn_trace_ida.py` 和 `unicorn_trace` 文件夹放入 IDA 的 `plugins` 目录
@@ -69,11 +82,26 @@ ida 调试到指定位置后，写入期望的运行地址，会自动运行且�
 
 直接在 main 函数里填写所需参数，内容同上
 
-
 ### 功能二：独立模拟器使用
+
+运行单个 dump 片段。
 
 ![alt text](imgs/2.gif)
 
+#### 使用 `run_once` 函数（推荐）：
+```python
+from unicorn_trace import run_once
+
+if __name__ == "__main__":
+    result = run_once(
+        dump_path="./dumps",
+        so_path="/path/to/your.so",
+        end_addr_relative=0x000000,
+        tdpr=None  # 可选的 TPIDR 值
+    )
+```
+
+#### 直接使用模拟器类：
 ```python
 from unicorn_trace import SelfRunArm64Emulator
 
@@ -82,7 +110,7 @@ emulator = SelfRunArm64Emulator()
 emulator.setup_from_files("libtarget.so", "./dumps")
 
 # 运行模拟
-emulator.custom_main_trace(
+result = emulator.custom_main_trace(
     so_name="libtarget.so",
     end_addr=0x123456,
     tenet_log_path="./trace.log",
@@ -90,6 +118,44 @@ emulator.custom_main_trace(
     load_dumps_path="./dumps"
 )
 ```
+
+### 功能三：追踪全部流程
+
+当处理包含多个外部函数调用的代码时，插件会为每个执行片段创建单独的 dump 文件夹。`unicorn_trace.py` 中的 `run_all_continuous` 函数允许您按顺序执行所有这些片段，跳过外部调用并合并追踪日志。
+
+你可以直接把它当黑盒用，直接可以模拟执行全部流程
+
+#### 使用示例：
+
+```python
+# 在 unicorn_trace.py 或您自己的脚本中
+from unicorn_trace import run_all_continuous
+
+# 按时间顺序执行所有 dump 文件夹
+success = run_all_continuous(
+    dump_path="./tmp",
+    so_path="/path/to/your.so",
+    end_addr_relative=end_addr
+)
+
+if success:
+    print("连续执行成功完成！")
+else:
+    print("连续执行失败或未完成。")
+```
+
+#### 工作原理：
+1. **排序 dump 文件夹**：自动按时间戳排序 `dump_<timestamp>` 文件夹（从早到晚）
+2. **连续执行**：按顺序执行每个 dump 文件夹，从第一个开始
+3. **外部调用跳过**：遇到外部函数调用时（result_code == 1），自动继续下一个 dump 文件夹
+4. **日志合并**：将所有执行日志合并为连续的 `continuous_sim.log` 和 `continuous_tenet.log` 文件
+5. **状态保持**：在执行片段之间保持寄存器状态（当模拟器支持时）
+
+#### 优势：
+- **无缝分析**：即使代码调用外部库也能获得连续追踪
+- **时间顺序执行**：确保执行遵循实际的时间顺序
+- **自动化工作流**：无需手动单独运行每个 dump 文件夹
+- **统一日志**：所有追踪数据集中一处，便于分析
 
 ## 示例工作流
 
@@ -127,6 +193,47 @@ emulator.custom_main_trace(
 - ida 断点导致出错：最好在运行时手动 disable 所有的 ida 断点，不然在运行对比和跳过调用时可能会出错
 - ida 报错：ida 报错会导致运行暂停，再次运行即可
 
+## API 参考
+
+### 主要函数
+
+#### `run_once(dump_path, so_path, end_addr_relative, tdpr=None)`
+执行单个 dump 文件夹。
+
+**参数：**
+- `dump_path`：dump 文件夹路径
+- `so_path`：共享对象文件路径
+- `end_addr_relative`：相对于基址的目标地址
+
+**返回值：**
+- 结果代码（114514 表示成功，其他代码表示错误）
+
+#### `run_all_continuous(dump_path, so_path, end_addr_relative, tdpr=None)`
+连续执行多个 dump 文件夹。
+
+**参数：**
+- `dump_path`：包含 dump 文件夹的路径
+- `so_path`：共享对象文件路径
+- `end_addr_relative`：相对于基址的目标地址
+
+**返回值：**
+- 如果执行到达目标地址返回 `True`，否则返回 `False`
+
+#### `main(endaddr_relative, so_path, tpidr_value_input=None, load_path=".", save_path=".")`
+传统的单次执行主函数。
+
+### 类
+
+#### `SelfRunArm64Emulator`
+用于独立执行的主要模拟器类。
+
+**关键方法：**
+- `setup_from_files(so_path, load_path)`：从 dump 文件初始化
+- `custom_main_trace(so_name, end_addr, tenet_log_path=None, user_log_path="./uc.log", load_dumps_path="./dumps")`：执行模拟
+
+#### `IDAArm64Emulator`
+IDA 集成模拟器类（插件使用）。
+
 ## 贡献
 
 欢迎提交 Issue 或 Pull Request。请确保：
@@ -136,12 +243,23 @@ emulator.custom_main_trace(
 
 ## TODO
 
-提升效率，中间 dump mem 后接着后续运行而不是重新开始
+### 已完成
+- ✓ **连续执行**：在 `unicorn_trace.py` 中添加了 `run_all_continuous` 函数，可按顺序执行多个 dump 文件夹，跳过外部调用并合并追踪日志
+- ✓ **提升效率**：中间 dump mem 后接着后续运行而不是重新开始
 
-多架构适配
+### 进行中 / 未来改进
+- 多架构适配
+- 更好的执行片段间状态保持
+- 增强的外部调用检测和处理
+- 大型内存转储的性能优化
+- 连续执行的 GUI 界面配置
 
-## Reference
+## 参考
 
 Tenet IDA 9.0: https://github.com/jiqiu2022/Tenet-IDA9.0
 
 Tenet: https://github.com/gaasedelen/tenet
+
+Unicorn Engine: https://github.com/unicorn-engine/unicorn
+
+Capstone Engine: https://github.com/capstone-engine/capstone
