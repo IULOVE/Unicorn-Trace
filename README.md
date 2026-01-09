@@ -43,6 +43,7 @@ The tool doesn't require full memory dumps, instead dynamically dumping memory o
 │   ├── 1.gif
 │   ├── 2.gif
 │   └── 3.gif
+├── example.py                    # Example for emulator 
 ├── README.md                     # English documentation
 └── README_zh.md                  # Chinese documentation
 ```
@@ -148,6 +149,8 @@ else:
 - **Time-ordered execution**: Ensures execution follows the actual temporal sequence
 - **Automated workflow**: No need to manually run each dump folder separately
 - **Consolidated logs**: All trace data in one place for easier analysis
+
+See `example.py`
 
 ## Example Workflow
 Also see [Kanxue Article](https://bbs.kanxue.com/thread-289135.htm)

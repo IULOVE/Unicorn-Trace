@@ -31,7 +31,7 @@ class SelfRunArm64Emulator(Arm64Emulator):
         
         return self.BASE
 
-    def custom_main_trace(self, so_name, end_addr, tenet_log_path=None, user_log_path="./uc.log", load_dumps_path="./dumps"):
+    def custom_main_trace(self, so_name, end_addr, tenet_log_path=None, user_log_path="./uc.log", load_dumps_path="./dumps", user_hook_func=None):
         """自定义主要模拟函数"""
         try:
             # 初始化日志文件
@@ -42,7 +42,7 @@ class SelfRunArm64Emulator(Arm64Emulator):
             
             # 加载寄存器状态
             self.load_registers(os.path.join(load_dumps_path, "regs.json"))
-            print("Registers loaded.")
+            self.log("Registers loaded.")
 
             # 重置寄存器跟踪
             self.last_registers.clear()
@@ -55,28 +55,34 @@ class SelfRunArm64Emulator(Arm64Emulator):
             try:
                 # 尝试读取堆内存，如果成功则说明已映射
                 self.mu.mem_read(self.HEAP_BASE, 1)
-                print(f"[!] 堆内存已映射，跳过映射: {hex(self.HEAP_BASE)}-{hex(self.HEAP_BASE + self.HEAP_SIZE)}")
+                self.log(f"[!] 堆内存已映射，跳过映射: {hex(self.HEAP_BASE)}-{hex(self.HEAP_BASE + self.HEAP_SIZE)}")
             except UcError:
                 # 堆内存未映射，进行映射
-                print(f"[+] 映射堆内存: {hex(self.HEAP_BASE)}-{hex(self.HEAP_BASE + self.HEAP_SIZE)} 大小: {hex(self.HEAP_SIZE)}")
+                self.log(f"[+] 映射堆内存: {hex(self.HEAP_BASE)}-{hex(self.HEAP_BASE + self.HEAP_SIZE)} 大小: {hex(self.HEAP_SIZE)}")
                 self.mu.mem_map(self.HEAP_BASE, self.HEAP_SIZE)
 
             # 设置调试钩子（先清理之前的钩子）
             self.hooks.clear()
             start_addr = self.mu.reg_read(self.REG_MAP["pc"])
             self.hooks.append(self.mu.hook_add(UC_HOOK_CODE, self.debug_hook_code, begin=start_addr))
-
+            
+            if user_hook_func != None:
+                self.hooks.append(self.mu.hook_add(
+                    UC_HOOK_CODE,
+                    lambda uc, addr, size, user_data: user_hook_func(self, uc, addr, size),
+                    begin=start_addr
+                ))
             # 开始模拟
             self.mu.emu_start(start_addr, end_addr)
 
         except UcError as e:
             return self._handle_uc_error(e)
         except Exception as e:
-            print(f"发生未知错误: {e}")
+            self.log(f"发生未知错误: {e}")
             self.my_reg_logger()
             return 0
         finally:
-            print(f"Trace END!")
+            self.log(f"Trace END!")
             # 清理资源
             self.cleanup()
         
@@ -84,7 +90,7 @@ class SelfRunArm64Emulator(Arm64Emulator):
 
     def _handle_uc_error(self, e):
         """处理Unicorn错误，与dyn_trace_ida.py保持一致"""
-        print("ERROR: %s" % e)
+        self.log("ERROR: %s" % e)
         err_str = "%s" % e
         self.my_reg_logger()
 
@@ -101,7 +107,7 @@ class SelfRunArm64Emulator(Arm64Emulator):
             
         # 检查寄存器是否没有变化
         if self.last_regs == self.dump_registers():
-            print(f"[!] Stop at the same location. Jump out. Maybe Check MRS opcode and TPIDR regs")
+            self.log(f"[!] Stop at the same location. Jump out. Maybe Check MRS opcode and TPIDR regs")
             return 0
         
         # 检查未映射内存错误
@@ -113,20 +119,20 @@ class SelfRunArm64Emulator(Arm64Emulator):
 
     def _handle_out_of_range_error(self):
         """处理超出范围错误"""
-        print(f"[+] Run to 0x{self.mu.reg_read(self.REG_MAP['lr']):x} for further run, PC: 0x{self.mu.reg_read(self.REG_MAP['pc']):x} ")
-        print("[+] 超出范围，继续下一个dump文件夹")
+        self.log(f"[+] Run to 0x{self.mu.reg_read(self.REG_MAP['lr']):x} for further run, PC: 0x{self.mu.reg_read(self.REG_MAP['pc']):x} ")
+        self.log("[+] 超出范围，继续下一个dump文件夹")
         return 1
 
     def _handle_autiasp_error(self):
         """处理AUTIASP错误"""
-        print(f"[+] Run to 0x{self.mu.reg_read(self.REG_MAP['pc']) + 4:x} for further run, PC: 0x{self.mu.reg_read(self.REG_MAP['pc']):x} ")
-        print("[+] AUTIASP指令，继续下一个dump文件夹")
+        self.log(f"[+] Run to 0x{self.mu.reg_read(self.REG_MAP['pc']) + 4:x} for further run, PC: 0x{self.mu.reg_read(self.REG_MAP['pc']):x} ")
+        self.log("[+] AUTIASP指令，继续下一个dump文件夹")
         return 1
 
     def _handle_exception_error(self):
         """处理异常错误"""
-        print(f"[+] Run to 0x{self.mu.reg_read(self.REG_MAP['lr']):x} for further run")
-        print("[+] 异常错误，继续下一个dump文件夹")
+        self.log(f"[+] Run to 0x{self.mu.reg_read(self.REG_MAP['lr']):x} for further run")
+        self.log("[+] 异常错误，继续下一个dump文件夹")
         return 1
 
 # ==============================
@@ -242,7 +248,7 @@ def run_all(dump_path:str, so_path:str, end_addr_relative:int, tdpr:int=None):
     combine_logs(dump_path,'sim.log', 'combined_sim.log')
     combine_logs(dump_path,'tenet.log', 'combined_tenet.log')
 
-def run_all_continuous(dump_path:str, so_path:str, end_addr_relative:int, tdpr:int=None):
+def run_all_continuous(dump_path:str, so_path:str, end_addr_relative:int, tdpr:int=None, user_hook_func=None, debug_switch=False):
     """
     新的连续执行函数：从前面往后面执行，跳过外部调用并合并
     
@@ -286,6 +292,7 @@ def run_all_continuous(dump_path:str, so_path:str, end_addr_relative:int, tdpr:i
     first_folder = dump_folders[0]
     first_path = f"{dump_path}/{first_folder}"
     BASE = emulator.setup_from_files(so_path, first_path)
+    emulator.debug = debug_switch
     end_addr = BASE + end_addr_relative
     
     print(f"[+] 基础地址: {hex(BASE)}")
@@ -307,7 +314,8 @@ def run_all_continuous(dump_path:str, so_path:str, end_addr_relative:int, tdpr:i
             end_addr,
             user_log_path=f"{segment_dir}/sim.log",
             tenet_log_path=f"{segment_dir}/tenet.log",
-            load_dumps_path=dump_folder_path
+            load_dumps_path=dump_folder_path,
+            user_hook_func=user_hook_func
         )
         
         # 合并日志
