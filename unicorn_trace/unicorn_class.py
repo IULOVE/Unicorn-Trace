@@ -62,6 +62,7 @@ class Arm64Emulator:
         self.hooks = []
         
         self.BASE = 0
+        self.END = 0
         self.HEAP_BASE = heap_base
         self.HEAP_SIZE = heap_size
         self.PHEAP = heap_base
@@ -309,11 +310,13 @@ class Arm64Emulator:
         
         tmp_buffer = ""
         if changed_regs_line and self.trace_log:
-            tmp_buffer += changed_regs_line + ","
+            tmp_buffer += changed_regs_line
         
         output_line = ""
         if memory_accesses:
             output_line += "," + ",".join(memory_accesses)
+        if not "PC" in tmp_buffer:
+            tmp_buffer += "," + f"PC=0x{address:x}"
         if self.trace_log:
             self.trace_log.write(tmp_buffer + output_line + "\n")
 
@@ -484,21 +487,41 @@ class Arm64Emulator:
 
         # 按照内存基址排序后加载
         map_list.sort(key=lambda x: x[0])
-        
+        self.map_range.sort(key=lambda x: x[0])
+
+        new_map_range = []
+        current_start, current_end = None, None
+
+        for start, end in self.map_range:
+            if current_end is None:
+                current_start, current_end = start, end
+            elif current_end == start:
+                current_end = end
+            else:
+                new_map_range.append((current_start, current_end))
+                current_start, current_end = start, end
+
+        # 添加最后一个区间
+        if current_start is not None:
+            new_map_range.append((current_start, current_end))
+
+        self.map_range = new_map_range
+
         for mem_base, mem_end, mem_size, filename in map_list:
             if filename in self.loaded_files:
                 continue
 
-            upper_bound = 0
-            lower_bound = 0xfffffffffffffffff
+            upper_bound = mem_base
+            lower_bound = mem_end
 
             for mem_range in self.map_range:
-                if mem_base <= mem_range[1] and mem_base >= mem_range[0]:
-                    upper_bound = mem_range[1]
-                if mem_end <= mem_range[1] and mem_end >= mem_range[0]:
-                    lower_bound = mem_range[0]
-                if upper_bound != 0 and lower_bound != 0xfffffffffffffffff:
-                    break
+                if upper_bound <= mem_range[1] and upper_bound >= mem_range[0]:
+                    if upper_bound < mem_range[1]:
+                        upper_bound = mem_range[1]
+
+                if lower_bound <= mem_range[1] and lower_bound >= mem_range[0]:
+                    if lower_bound > mem_range[0]:
+                        lower_bound = mem_range[0]
 
             if mem_base < upper_bound:
                 mem_base = upper_bound
@@ -527,14 +550,14 @@ class Arm64Emulator:
 
         # 加载内存数据
         for mem_base, mem_end, mem_size, filename in map_list:
-            if filename not in self.loaded_files:
-                self.log(f"write file {filename} {hex(mem_base)} {hex(mem_end)} {hex(mem_size)}")
-                self.load_file(os.path.join(load_dumps_path, filename), mem_base, mem_size)
-                self.loaded_files.append(filename)
+            # if filename not in self.loaded_files:
+            self.log(f"write file {filename} {hex(mem_base)} {hex(mem_end)} {hex(mem_size)}")
+            self.load_file(os.path.join(load_dumps_path, filename), mem_base, mem_size)
+            self.loaded_files.append(filename)
 
     def init_trace_log(self, so_name):
         """初始化trace日志"""
-        self.trace_log.write(f"# SO: {so_name} @ {hex(self.BASE)}\n")
+        # self.trace_log.write(f"# SO: {so_name} @ {hex(self.BASE)}\n")
         
         # 记录初始寄存器状态
         initial_regs = []

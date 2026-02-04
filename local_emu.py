@@ -24,10 +24,10 @@ class SelfRunArm64Emulator(Arm64Emulator):
         with open(f"{load_path}/regs.json", "r") as f:
             tmp = json.load(f)
             self.BASE = int(tmp["base"], 16)
+            self.END = int(tmp["end"], 16)
         
         # 计算运行范围
-        file_size = os.path.getsize(so_path)
-        self.run_range = (self.BASE, self.BASE + file_size)
+        self.run_range = (self.BASE, self.END)
         
         return self.BASE
 
@@ -96,6 +96,7 @@ class SelfRunArm64Emulator(Arm64Emulator):
 
         # 检查errno == 0的情况
         if e.errno == 0:
+            self.log(e.args[0])
             if "Code Run out of range" in e.args[0]:
                 return self._handle_out_of_range_error()
             if "Except AUTIASP" in e.args[0]:
@@ -259,7 +260,7 @@ def run_all_continuous(dump_path:str, so_path:str, end_addr_relative:int, tdpr:i
         tdpr: TPIDR寄存器值 (无需填写)
     
     返回:
-        bool: 是否成功执行到目标地址
+        emulator: 模拟器
     """
     # 1. 获取并排序 dump 文件夹
     dump_folders = get_sorted_dump_folders(dump_path)
@@ -303,7 +304,6 @@ def run_all_continuous(dump_path:str, so_path:str, end_addr_relative:int, tdpr:i
     for i, folder in enumerate(dump_folders):
         dump_folder_path = f"{dump_path}/{folder}"
         print(f"\n[+] 处理第 {i+1}/{len(dump_folders)} 个dump文件夹: {folder}")
-        
         # 创建当前片段的输出目录
         segment_dir = f"{output_dir}/segment_{i:03d}"
         os.makedirs(segment_dir, exist_ok=True)
@@ -340,8 +340,8 @@ def run_all_continuous(dump_path:str, so_path:str, end_addr_relative:int, tdpr:i
             # 暂时简单继续，实际需要保存和恢复状态
             continue
         elif result_code == 2:
-            print("[+] 需要更新内存，但独立模式下无法处理，继续下一个")
-            continue
+            print("[+] 需要更新内存，出现错误")
+            break
         elif result_code == 0:
             print(f"[!] 遇到错误，结果码: 0")
             print("[!] 停止执行")
@@ -373,7 +373,7 @@ def run_all_continuous(dump_path:str, so_path:str, end_addr_relative:int, tdpr:i
     combine_logs(output_dir, 'tenet.log', f"{output_dir}/all_tenet.log")
     combine_logs(dump_path, 'uc.log', f"{output_dir}/all_uc.log")
     
-    return success
+    return emulator
 
 def run_once(dump_path:str, so_path:str,end_addr_relative:int, tdpr:int=None):
     result = main(end_addr_relative, 

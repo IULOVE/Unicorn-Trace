@@ -17,7 +17,7 @@ from unicorn_trace.unicorn_class import Arm64Emulator # type: ignore
 # ==============================
 
 DUMP_SINGLE_SEG_SIZE = 0x4000
-ROUND_MAX = 50
+ROUND_MAX = 1000
 
 # ==============================
 # 插件表单类
@@ -389,15 +389,128 @@ class IDAArm64Emulator(Arm64Emulator):
         self.dump_segment_to_file(dump_base, dump_end, filename)
 
         # 处理跨段读写
-        if next_dump_flag and seg_end - seg_start < 0x1000:
-            self.dump_single_segment_address(seg_end + 100, 0x1000, file_dump_path, False)
+        if next_dump_flag:
+            tmp_addr = seg_end
+            while tmp_addr < dump_base + range_size:
+                self.dump_single_segment_address(tmp_addr + 1, range_size, file_dump_path, False)
+                tmp_seg = self.find_segment_by_address(tmp_addr + 1)
+                if not tmp_seg:
+                    print(f"[+] {target_addr} do not contain the addr")
+                    return
+
+                tmp_addr += tmp_seg.end_ea - tmp_seg.start_ea
+
 
     def dump_registers_memory(self):    
-        """转储寄存器指向的内存"""
+        """转储寄存器指向的内存，包括当前指令可能访问的内存地址"""
+        try:
+            # 获取当前PC
+            current_pc = self.mu.reg_read(self.REG_MAP["pc"])
+            
+            # 获取前一条指令的地址（因为当前PC可能已经指向下一条指令）
+            prev_inst_addr = current_pc
+            
+            try:
+                # 读取指令
+                code = self.mu.mem_read(prev_inst_addr, 4)
+                # 反汇编指令
+                insn = next(self.md.disasm(code, prev_inst_addr), None)
+                
+                if insn:
+                    # 检查是否是内存加载指令
+                    if any(insn.mnemonic.startswith(prefix) for prefix in self.READ_INSTRUCTIONS):
+                        self.log(f"[+] 分析内存加载指令: {insn.mnemonic} {insn.op_str}")
+                        
+                        # 分析内存操作数
+                        memory_addresses = self._analyze_memory_operands_for_dump(insn)
+                        
+                        if memory_addresses:
+                            for addr in memory_addresses:
+                                self.log(f"[+] 需要dump的内存地址: {hex(addr)}")
+                                self.dump_single_segment_address(addr, DUMP_SINGLE_SEG_SIZE, self.dump_path, True)
+                                return
+                        else:
+                            self.log("[!] 无法解析内存地址")
+            except Exception as e:
+                self.log(f"[!] 分析指令时出错: {e}")
+            
+        except Exception as e:
+            self.log(f"[!] 获取当前PC时出错: {e}")
+        
+        # 同时转储所有寄存器指向的内存（原有逻辑）
         for reg_name in self.REG_MAP.keys():
-            if "w" in reg_name:
+            if "w" in reg_name or "tpidr" in reg_name:
                 continue
-            self.dump_single_segment_address(self.mu.reg_read(self.REG_MAP[reg_name]), DUMP_SINGLE_SEG_SIZE, self.dump_path, True)
+            try:
+                reg_value = self.mu.reg_read(self.REG_MAP[reg_name])
+                self.dump_single_segment_address(reg_value, DUMP_SINGLE_SEG_SIZE, self.dump_path, True)
+            except Exception as e:
+                self.log(f"[!] 读取寄存器 {reg_name} 时出错: {e}")
+
+    def _analyze_memory_operands_for_dump(self, insn):
+        """专门用于dump的内存操作数分析"""
+        memory_addresses = []
+        
+        for op in insn.operands:
+            if op.type == capstone.CS_OP_MEM:
+                mem = op.value.mem
+                base_reg = insn.reg_name(mem.base) if mem.base != 0 else None
+                index_reg = insn.reg_name(mem.index) if mem.index != 0 else None
+                disp = mem.disp
+                
+                try:
+                    # 获取基址寄存器的值
+                    base_val = 0
+                    if base_reg:
+                        if base_reg in self.REG_MAP:
+                            base_val = self.mu.reg_read(self.REG_MAP[base_reg])
+                        else:
+                            # 处理特殊寄存器如xzr/wzr（零寄存器）
+                            if base_reg in ['xzr', 'wzr']:
+                                base_val = 0
+                            else:
+                                self.log(f"[!] 未知基址寄存器: {base_reg}")
+                                continue
+                    
+                    # 获取索引寄存器的值
+                    index_val = 0
+                    if index_reg:
+                        if index_reg in self.REG_MAP:
+                            index_val = self.mu.reg_read(self.REG_MAP[index_reg])
+                        else:
+                            if index_reg in ['xzr', 'wzr']:
+                                index_val = 0
+                            else:
+                                self.log(f"[!] 未知索引寄存器: {index_reg}")
+                                continue
+                    
+                    # 计算内存地址
+                    mem_addr = base_val
+                    if index_reg:
+                        # 检查是否有比例因子（scale）
+                        if hasattr(mem, 'scale') and mem.scale != 1:
+                            mem_addr += index_val * mem.scale
+                        else:
+                            mem_addr += index_val
+                    mem_addr += disp
+                    mem_addr = mem_addr & 0xFFFFFFFFFFFFFFFF
+                    
+                    memory_addresses.append(mem_addr)
+                    
+                    # 记录详细日志
+                    self.log(f"  - 内存访问: {insn.mnemonic}")
+                    # self.log(f"    基址寄存器: {base_reg} = {hex(base_val)}")
+                    # if index_reg:
+                    #     self.log(f"    索引寄存器: {index_reg} = {hex(index_val)}")
+                    # if disp != 0:
+                    #     self.log(f"    偏移量: {hex(disp)}")
+                    self.log(f"    计算地址: {hex(mem_addr)}")
+                    
+                except Exception as e:
+                    self.log(f"[!] 计算内存地址时出错: {e}")
+                    self.log(f"    指令: {insn.mnemonic} {insn.op_str}")
+        
+        return memory_addresses
 
     def check_registers(self):
         """检查寄存器一致性"""
@@ -430,10 +543,7 @@ class IDAArm64Emulator(Arm64Emulator):
                 reg_value = reg_value & 0xffffffffffffff
             print(f"x{i} = " + hex(reg_value))
             registers[f"x{i}"] = hex(reg_value)
-        
-        base = idaapi.get_imagebase()
-        registers["base"] = hex(base)
-        
+                
         return registers
 
 # ==============================
@@ -458,10 +568,17 @@ def uni_trace_main(endaddr_relative:int, so_name: str = "", tpidr_value_input: i
         registers = emulator._collect_register_state()
         
         emulator.BASE = idaapi.get_imagebase()
-        file_size = os.path.getsize(idc.get_input_file_path())
-        emulator.run_range = (emulator.BASE, emulator.BASE + file_size)
 
-        print(f"[+] BASE = {hex(emulator.BASE)}")
+        text_seg = ida_segment.get_segm_by_name(".text")
+        if text_seg:
+            emulator.END = text_seg.end_ea
+        else:
+            print("[-] Cannot FOUND .text seg")
+            break
+
+        emulator.run_range = (emulator.BASE, emulator.END)
+
+        print(f"[+] BASE = {hex(emulator.BASE)} END = {hex(emulator.END)}")
         print("[+] DUMPING memory")
         
         # 转储寄存器指向的内存
@@ -472,7 +589,10 @@ def uni_trace_main(endaddr_relative:int, so_name: str = "", tpidr_value_input: i
         
         # 保存寄存器状态
         if tpidr_value_input != None:
-            registers["tpidr"] = tpidr_value_input
+            registers["tpidr"] = hex(tpidr_value_input)
+
+        registers["base"] = hex(emulator.BASE)
+        registers["end"] = hex(emulator.END)
 
         print("[+] DUMPING registers")
         with open(f"{emulator.dump_path}/regs.json", "w+") as f:
