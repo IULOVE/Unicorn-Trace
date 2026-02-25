@@ -31,7 +31,9 @@ class Arm64Emulator:
         "w28": UC_ARM64_REG_W28, "w29": UC_ARM64_REG_W29, "w30": UC_ARM64_REG_W30,
         
         # Special registers
-        "pc": UC_ARM64_REG_PC, "sp": UC_ARM64_REG_SP, "fp": UC_ARM64_REG_X29, "lr": UC_ARM64_REG_X30
+        "pc": UC_ARM64_REG_PC, "sp": UC_ARM64_REG_SP, "fp": UC_ARM64_REG_X29, "lr": UC_ARM64_REG_X30,
+
+        "tpidr": UC_ARM64_REG_TPIDR_EL0
     }
     
     # 内存访问指令常量
@@ -60,6 +62,7 @@ class Arm64Emulator:
         self.hooks = []
         
         self.BASE = 0
+        self.END = 0
         self.HEAP_BASE = heap_base
         self.HEAP_SIZE = heap_size
         self.PHEAP = heap_base
@@ -70,6 +73,13 @@ class Arm64Emulator:
         self.now_contain = ""
         
         self.loaded_files = []
+        self.map_range = []
+        self.debug = True
+
+    def log(self, *args, **kwargs):
+        """根据 debug 开关打印信息"""
+        if self.debug:
+            print(*args, **kwargs)
     # ==============================
     # 内存管理方法
     # ==============================
@@ -87,7 +97,7 @@ class Arm64Emulator:
                 if reg_name in self.REG_MAP:
                     if isinstance(value, str):
                         value = int(value, 16)
-                    print(f"Setting {reg_name} to {hex(value)}")
+                    self.log(f"Setting {reg_name} to {hex(value)}")
                     self.mu.reg_write(self.REG_MAP[reg_name], value)
 
     def dump_registers(self):
@@ -136,29 +146,29 @@ class Arm64Emulator:
 
     def my_malloc_impl(self, size):
         """malloc实现"""
-        print(f"[+] malloc size {hex(size)}")
+        self.log(f"[+] malloc size {hex(size)}")
         self.PHEAP += size
         return self.PHEAP
 
     def my_malloc_handler(self, uc, address, size, user_data):
         """malloc hook处理"""
-        print(f"[+] INTO Malloc {self.mu.reg_read(UC_ARM64_REG_X0)} LR = {hex(self.mu.reg_read(UC_ARM64_REG_LR))}")
+        self.log(f"[+] INTO Malloc {self.mu.reg_read(UC_ARM64_REG_X0)} LR = {hex(self.mu.reg_read(UC_ARM64_REG_LR))}")
         uc.reg_write(UC_ARM64_REG_X0, self.my_malloc_impl(self.mu.reg_read(UC_ARM64_REG_X0)))
         uc.reg_write(UC_ARM64_REG_PC, self.mu.reg_read(UC_ARM64_REG_LR))
 
     def my_free_handler(self, uc, address, size, user_data):
         """free hook处理"""
-        print(f"[+] free NOP")
+        self.log(f"[+] free NOP")
         uc.reg_write(UC_ARM64_REG_PC, self.mu.reg_read(UC_ARM64_REG_LR))
 
     def my_memset_impl(self, ptr, value, num):
         """memset实现"""
-        print(f"[+] memset ptr {hex(ptr)}, value {hex(value)}, size {hex(num)}")
+        self.log(f"[+] memset ptr {hex(ptr)}, value {hex(value)}, size {hex(num)}")
         return ptr
 
     def my_memset_handler(self, uc, address, size, user_data):
         """memset hook处理"""
-        print(f"[+] INTO Memset")
+        self.log(f"[+] INTO Memset")
         ptr = self.mu.reg_read(UC_ARM64_REG_X0)
         value = self.mu.reg_read(UC_ARM64_REG_X1)
         num = self.mu.reg_read(UC_ARM64_REG_X2)
@@ -206,7 +216,7 @@ class Arm64Emulator:
                                 hex_bytes = hex_bytes.ljust(32, '0')[:32]
                             memory_accesses.append(f"mr=0x{mem_addr:x}:{hex_bytes}")
                         except Exception as e:
-                            print(f"内存读取错误: {e} - 指令: {insn.mnemonic} {insn.op_str}")
+                            self.log(f"内存读取错误: {e} - 指令: {insn.mnemonic} {insn.op_str}")
                     
                     # 处理写入指令
                     elif any(insn.mnemonic.startswith(prefix) for prefix in self.WRITE_INSTRUCTIONS):
@@ -220,10 +230,10 @@ class Arm64Emulator:
                                     hex_bytes = hex_bytes.ljust(32, '0')[:32]
                                 memory_accesses.append(f"mw=0x{mem_addr:x}:{hex_bytes}")
                             except Exception as e:
-                                print(f"内存写入错误: {e} - 指令: {insn.mnemonic} {insn.op_str}")
+                                self.log(f"内存写入错误: {e} - 指令: {insn.mnemonic} {insn.op_str}")
                                 
                 except Exception as e:
-                    print(f"计算内存地址错误: {e} - 指令: {insn.mnemonic} {insn.op_str}")
+                    self.log(f"计算内存地址错误: {e} - 指令: {insn.mnemonic} {insn.op_str}")
                     
         return memory_accesses
 
@@ -300,11 +310,13 @@ class Arm64Emulator:
         
         tmp_buffer = ""
         if changed_regs_line and self.trace_log:
-            tmp_buffer += changed_regs_line + ","
+            tmp_buffer += changed_regs_line
         
         output_line = ""
         if memory_accesses:
             output_line += "," + ",".join(memory_accesses)
+        if not "PC" in tmp_buffer:
+            tmp_buffer += "," + f"PC=0x{address:x}"
         if self.trace_log:
             self.trace_log.write(tmp_buffer + output_line + "\n")
 
@@ -379,7 +391,7 @@ class Arm64Emulator:
         """调试钩子，用于其他调试目的"""
         # 检查执行范围
         if address <= self.run_range[0] or address >= self.run_range[1]:
-            print("OUT OF RANGE")
+            self.log("OUT OF RANGE")
             raise UcError(0, f"Code Run out of range (0x{self.run_range[0]:x}, 0x{self.run_range[1]:x})")
         
         # 处理特殊指令
@@ -387,6 +399,10 @@ class Arm64Emulator:
         if code == b"\xBF\x23\x03\xD5":  # handle autiasp
             raise UcError(0, "Except AUTIASP")
 
+        code = self.mu.mem_read(address, 4)
+        if code == b"\x01\x00\x00\xD4":  # handle autiasp
+            raise UcError(0, "Except AUTIASP")
+        
         # 处理寄存器值修正
         self._fix_register_values()
         
@@ -406,9 +422,9 @@ class Arm64Emulator:
 
     def my_reg_logger(self):
         """打印寄存器状态"""
-        print("PC :", hex(self.mu.reg_read(UC_ARM64_REG_PC)))
-        print("SP :", hex(self.mu.reg_read(UC_ARM64_REG_SP)))
-        print("NZCV:", hex(self.mu.reg_read(UC_ARM64_REG_NZCV)))
+        self.log("PC :", hex(self.mu.reg_read(UC_ARM64_REG_PC)))
+        self.log("SP :", hex(self.mu.reg_read(UC_ARM64_REG_SP)))
+        self.log("NZCV:", hex(self.mu.reg_read(UC_ARM64_REG_NZCV)))
         
         reg_names = [
             ("x0", UC_ARM64_REG_X0), ("x1", UC_ARM64_REG_X1),
@@ -432,14 +448,14 @@ class Arm64Emulator:
         for i in range(0, len(reg_names), 4):
             for name, reg in reg_names[i:i+4]:
                 value = self.mu.reg_read(reg)
-                print(f"{name:<3}: {hex(value):<18}", end=" ")
-            print()
+                self.log(f"{name:<3}: {hex(value):<18}", end=" ")
+            self.log()
 
     def dump_memory(self, filename, address, size):
         """转储内存到文件"""
         with open(filename, "wb") as f:
             f.write(self.mu.mem_read(address, size))
-        print(f"Memory dumped to {filename}")
+        self.log(f"Memory dumped to {filename}")
 
     # ==============================
     # 初始化方法
@@ -453,8 +469,9 @@ class Arm64Emulator:
         if user_log_path:
             self.log_file = open(user_log_path, "w")
 
+
     def load_memory_mappings(self, load_dumps_path):
-        """加载内存映射"""
+        """重写：加载内存映射，集成IDA段信息"""
         mem_list = os.listdir(load_dumps_path)
         map_list = []
         
@@ -462,44 +479,85 @@ class Arm64Emulator:
         for filename in mem_list:
             pattern = r'0x([0-9a-fA-F]+)_0x([0-9a-fA-F]+)_0x([0-9a-fA-F]+)\.bin$'
             match = re.search(pattern, filename)
-            if match and filename not in self.loaded_files:
+            if match:
                 mem_base = int(match.group(1), 16)
                 mem_end = int(match.group(2), 16)
                 mem_size = int(match.group(3), 16)
                 map_list.append((mem_base, mem_end, mem_size, filename))
-                self.loaded_files.append(filename)
 
         # 按照内存基址排序后加载
         map_list.sort(key=lambda x: x[0])
-        tmp = (0, 0, 0, "")
-        
+        self.map_range.sort(key=lambda x: x[0])
+
+        new_map_range = []
+        current_start, current_end = None, None
+
+        for start, end in self.map_range:
+            if current_end is None:
+                current_start, current_end = start, end
+            elif current_end == start:
+                current_end = end
+            else:
+                new_map_range.append((current_start, current_end))
+                current_start, current_end = start, end
+
+        # 添加最后一个区间
+        if current_start is not None:
+            new_map_range.append((current_start, current_end))
+
+        self.map_range = new_map_range
+
         for mem_base, mem_end, mem_size, filename in map_list:
-            # 内存对齐处理
-            if mem_base < tmp[1]:
-                mem_base = tmp[1]
-            elif mem_base & 0xfff != 0:
+            if filename in self.loaded_files:
+                continue
+
+            upper_bound = mem_base
+            lower_bound = mem_end
+
+            for mem_range in self.map_range:
+                if upper_bound <= mem_range[1] and upper_bound >= mem_range[0]:
+                    if upper_bound < mem_range[1]:
+                        upper_bound = mem_range[1]
+
+                if lower_bound <= mem_range[1] and lower_bound >= mem_range[0]:
+                    if lower_bound > mem_range[0]:
+                        lower_bound = mem_range[0]
+
+            if mem_base < upper_bound:
+                mem_base = upper_bound
+            if mem_base & 0xfff != 0:
                 mem_base = mem_base & 0xfffffffffffff000
 
+            if mem_end > lower_bound:
+                mem_end = lower_bound
+            
             mem_size = mem_end - mem_base
+
+            # if mem_size <= 0:
+            #     mem_size = 0x1000            
             if mem_size <= 0:
-                mem_size = 0x1000
+                self.log(f"continue: map file {filename} {hex(mem_base)} {hex(mem_end)} {hex(mem_size)}, bound ({hex(upper_bound)} - {hex(lower_bound)})")
+                continue
+
             elif mem_size & 0xfff != 0:
                 mem_size = (mem_size & 0xfffffffffffff000) + 0x1000
 
             mem_end = mem_base + mem_size
-            tmp = (mem_base, mem_end, mem_size, filename)
-            
-            print(f"map file {filename} {hex(mem_base)} {hex(mem_end)} {hex(mem_size)}")
+
+            self.log(f"map file {filename} {hex(mem_base)} {hex(mem_end)} {hex(mem_size)}, bound ({hex(upper_bound)} - {hex(lower_bound)})")
             self.mu.mem_map(mem_base, mem_size)
+            self.map_range.append((mem_base, mem_end))
 
         # 加载内存数据
         for mem_base, mem_end, mem_size, filename in map_list:
-            print(f"write file {filename} {hex(mem_base)} {hex(mem_end)} {hex(mem_size)}")
+            # if filename not in self.loaded_files:
+            self.log(f"write file {filename} {hex(mem_base)} {hex(mem_end)} {hex(mem_size)}")
             self.load_file(os.path.join(load_dumps_path, filename), mem_base, mem_size)
+            self.loaded_files.append(filename)
 
     def init_trace_log(self, so_name):
         """初始化trace日志"""
-        self.trace_log.write(f"# SO: {so_name} @ {hex(self.BASE)}\n")
+        # self.trace_log.write(f"# SO: {so_name} @ {hex(self.BASE)}\n")
         
         # 记录初始寄存器状态
         initial_regs = []
@@ -531,7 +589,7 @@ class Arm64Emulator:
 
             # 加载寄存器状态
             self.load_registers(os.path.join(load_dumps_path, "regs.json"))
-            print("Registers loaded.")  
+            self.log("Registers loaded.")  
 
             # 重置寄存器跟踪
             self.last_registers.clear()
@@ -551,10 +609,10 @@ class Arm64Emulator:
             self.mu.emu_start(start_addr, self.BASE + end_addr)
 
         except UcError as e:
-            print("ERROR: %s" % e)
+            self.log("ERROR: %s" % e)
             self.my_reg_logger()
         except Exception as e:
-            print(f"发生未知错误: {e}")    
+            self.log(f"发生未知错误: {e}")    
             self.my_reg_logger()
         finally:
             self.my_reg_logger()
@@ -562,7 +620,7 @@ class Arm64Emulator:
             if self.trace_log:
                 self._write_final_registers()
         
-        print(f"END!")    
+        self.log(f"END!")    
 
         # 清理资源
         if self.log_file:
@@ -588,10 +646,19 @@ class Arm64Emulator:
         """清理资源"""
         if self.log_file:
             self.log_file.close()
+            self.log_file = None
         if self.trace_log:
             self.trace_log.close()
+            self.trace_log = None
         
         # 移除所有钩子
         for hook in self.hooks:
-            self.mu.hook_del(hook)
+            try:
+                self.mu.hook_del(hook)
+            except Exception as e:
+                # 忽略钩子删除错误
+                pass
+        
+        # 清空钩子列表
+        self.hooks.clear()
 
